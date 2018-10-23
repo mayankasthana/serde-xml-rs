@@ -1,12 +1,17 @@
 use std::io::Write;
 use std::fmt::Display;
 
-use serde::ser::{self, Impossible, Serialize};
+use serde::ser::{self, Serialize};
 
 use error::{Error, ErrorKind, Result};
 use self::var::{Map, Struct};
+use self::seq::Seq;
+use self::tuples::Tuple;
 
 mod var;
+mod seq;
+mod helpers;
+mod tuples;
 
 
 /// A convenience method for serializing some object to a buffer.
@@ -112,13 +117,13 @@ where
     type Ok = ();
     type Error = Error;
 
-    type SerializeSeq = Impossible<Self::Ok, Self::Error>;
-    type SerializeTuple = Impossible<Self::Ok, Self::Error>;
-    type SerializeTupleStruct = Impossible<Self::Ok, Self::Error>;
-    type SerializeTupleVariant = Impossible<Self::Ok, Self::Error>;
+    type SerializeSeq = Seq<'w, W>;
+    type SerializeTuple = Tuple<'w, W>;
+    type SerializeTupleStruct = Tuple<'w, W>;
+    type SerializeTupleVariant = Tuple<'w, W>;
     type SerializeMap = Map<'w, W>;
     type SerializeStruct = Struct<'w, W>;
-    type SerializeStructVariant = Impossible<Self::Ok, Self::Error>;
+    type SerializeStructVariant = Struct<'w, W>;
 
     fn serialize_bool(self, v: bool) -> Result<Self::Ok> {
         if v {
@@ -208,9 +213,7 @@ where
         variant_index: u32,
         variant: &'static str,
     ) -> Result<Self::Ok> {
-        Err(
-            ErrorKind::UnsupportedOperation("serialize_unit_variant".to_string()).into(),
-        )
+        self.serialize_unit_struct(variant)
     }
 
     fn serialize_newtype_struct<T: ?Sized + Serialize>(
@@ -218,9 +221,7 @@ where
         name: &'static str,
         value: &T,
     ) -> Result<Self::Ok> {
-        Err(
-            ErrorKind::UnsupportedOperation("serialize_newtype_struct".to_string()).into(),
-        )
+        self.write_wrapped(name, value)
     }
 
     fn serialize_newtype_variant<T: ?Sized + Serialize>(
@@ -234,16 +235,11 @@ where
     }
 
     fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq> {
-        // TODO: Figure out how to constrain the things written to only be composites
-        Err(
-            ErrorKind::UnsupportedOperation("serialize_seq".to_string()).into(),
-        )
+        Ok(Seq::new(self))
     }
 
     fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple> {
-        Err(
-            ErrorKind::UnsupportedOperation("serialize_tuple".to_string()).into(),
-        )
+        Ok(Tuple::new(self))
     }
 
     fn serialize_tuple_struct(
@@ -251,9 +247,8 @@ where
         name: &'static str,
         len: usize,
     ) -> Result<Self::SerializeTupleStruct> {
-        Err(
-            ErrorKind::UnsupportedOperation("serialize_tuple_struct".to_string()).into(),
-        )
+        write!(self.writer, "<{}>", name)?;
+        Ok(Tuple::new_with_name(self, name))
     }
 
     fn serialize_tuple_variant(
@@ -263,9 +258,8 @@ where
         variant: &'static str,
         len: usize,
     ) -> Result<Self::SerializeTupleVariant> {
-        Err(
-            ErrorKind::UnsupportedOperation("serialize_tuple_variant".to_string()).into(),
-        )
+        write!(self.writer, "<{}>", name)?;
+        Ok(Tuple::new_with_name(self, name))
     }
 
     fn serialize_map(self, len: Option<usize>) -> Result<Self::SerializeMap> {
@@ -284,7 +278,8 @@ where
         variant: &'static str,
         len: usize,
     ) -> Result<Self::SerializeStructVariant> {
-        Err(ErrorKind::UnsupportedOperation("Result".to_string()).into())
+        write!(self.writer, "<{}>", variant)?;
+        Ok(Struct::new(self, variant))
     }
 }
 
@@ -294,6 +289,7 @@ mod tests {
     use super::*;
     use serde::Serializer as SerSerializer;
     use serde::ser::{SerializeMap, SerializeStruct};
+    use std::collections::BTreeMap;
 
     #[test]
     fn test_serialize_bool() {
@@ -403,19 +399,220 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn serialize_a_list() {
-        let inputs = vec![1, 2, 3, 4];
+        #[derive(Serialize)]
+        struct Foo;
+
+        let inputs = vec![Foo, Foo, Foo];
+        let should_be = "<Foo></Foo><Foo></Foo><Foo></Foo>";
+
+        let got = to_string(&inputs).unwrap();
+        assert_eq!(got, should_be);
+    }
+
+    #[test]
+    fn basic_newtype_struct() {
+        #[derive(Serialize)]
+        struct Foo(u32);
+
+        let f = Foo(5);
+        let should_be = "<Foo>5</Foo>";
 
         let mut buffer = Vec::new();
-
-        {
-            let mut ser = Serializer::new(&mut buffer);
-            inputs.serialize(&mut ser).unwrap();
-        }
+        f.serialize(&mut Serializer::new(&mut buffer)).unwrap();
 
         let got = String::from_utf8(buffer).unwrap();
-        println!("{}", got);
-        panic!();
+        assert_eq!(got, should_be);
+    }
+
+    #[test]
+    fn option_as_a_newtype_struct() {
+        #[derive(Serialize)]
+        struct Foo(Option<u32>);
+
+        let inputs = vec![(Foo(Some(5)), "<Foo>5</Foo>"), (Foo(None), "<Foo></Foo>")];
+
+        for (input, should_be) in inputs {
+            let mut buffer = Vec::new();
+            input.serialize(&mut Serializer::new(&mut buffer)).unwrap();
+
+            let got = String::from_utf8(buffer).unwrap();
+            assert_eq!(got, should_be);
+        }
+    }
+
+    #[test]
+    fn newtype_wrapper_around_a_map() {
+        #[derive(Serialize)]
+        struct Foo(BTreeMap<String, u32>);
+
+        let pairs = vec![(String::from("a"), 5), (String::from("hello"), 42)];
+        let map = Foo(pairs.into_iter().collect());
+
+        let should_be = "<Foo><a>5</a><hello>42</hello></Foo>";
+        let mut buffer = Vec::new();
+
+        map.serialize(&mut Serializer::new(&mut buffer)).unwrap();
+
+        let got = String::from_utf8(buffer).unwrap();
+        assert_eq!(got, should_be);
+    }
+
+    #[test]
+    fn newtype_around_unit() {
+        #[derive(Serialize)]
+        struct Foo(());
+
+        let should_be = "<Foo></Foo>";
+        let f = Foo(());
+
+        let mut buffer = Vec::new();
+        f.serialize(&mut Serializer::new(&mut buffer)).unwrap();
+
+        let got = String::from_utf8(buffer).unwrap();
+        assert_eq!(got, should_be);
+    }
+
+    #[test]
+    fn serializing_a_list_of_primitives_is_an_error() {
+        let dodgy = vec![1, 2, 3, 4, 5];
+        assert!(to_string(&dodgy).is_err());
+    }
+
+    #[test]
+    fn serializing_a_list_of_tuples_is_an_error() {
+        let dodgy = vec![(1, 2), (3, 4)];
+
+        assert!(to_string(&dodgy).is_err());
+    }
+
+    #[test]
+    fn serialize_list_of_newtype_enums() {
+        #[derive(Serialize)]
+        enum Foo {
+            A(u32),
+            B(bool),
+            C(Box<Foo>)
+        }
+
+        let f = vec![Foo::A(42), Foo::B(true), Foo::C(Box::new(Foo::B(false)))];
+        let should_be = "<A>42</A><B>true</B><C><B>false</B></C>";
+
+        let got = to_string(&f).unwrap();
+        assert_eq!(got, should_be);
+    }
+
+    #[test]
+    fn serialize_tuple_containing_non_primitive_types() {
+        #[derive(Serialize)]
+        struct Foo;
+        #[derive(Serialize)]
+        struct Bar;
+
+        let a = (Foo, Bar);
+        let should_be = "<Foo></Foo><Bar></Bar>";
+
+        let got = to_string(&a).unwrap();
+        assert_eq!(got, should_be);
+    }
+
+    #[test]
+    fn serialize_tuple_of_primitives_is_error() {
+        let value = (5, false);
+        assert!(to_string(&value).is_err());
+    }
+
+    #[test]
+    fn serialize_tuple_with_at_least_1_primitive_is_error() {
+        #[derive(Serialize)]
+        struct Foo;
+
+        let value = (5, Foo);
+        assert!(to_string(&value).is_err());
+    }
+
+    #[test]
+    fn serialize_a_tuple_struct_containing_no_primitives() {
+        #[derive(Serialize)]
+        struct Foo(Bar, Baz);
+        #[derive(Serialize)]
+        struct Bar;
+        #[derive(Serialize)]
+        struct Baz(u32);
+
+        let f = Foo(Bar, Baz(5));
+        let should_be = "<Foo><Bar></Bar><Baz>5</Baz></Foo>";
+
+        let got = to_string(&f).unwrap();
+        assert_eq!(got, should_be);
+    }
+
+    #[test]
+    fn tuple_struct_cant_contain_primitives() {
+        #[derive(Serialize)]
+        struct Foo(u32, &'static str);
+
+        let f = Foo(5, "bar");
+        assert!(to_string(&f).is_err());
+    }
+
+    #[test]
+    fn serialize_an_enum_with_a_unit_variant() {
+        #[derive(Serialize)]
+        enum Foo {
+            A, 
+        }
+
+        let f = Foo::A;
+        let should_be = "<A></A>";
+
+        let got = to_string(&f).unwrap();
+        assert_eq!(got, should_be);
+    }
+
+    #[test]
+    fn serialize_an_enum_with_a_tuple_variant_containing_primitives_is_error() {
+        #[derive(Serialize)]
+        enum Foo {
+            A(u32, &'static str), 
+        }
+
+        let f = Foo::A(5, "bar");
+        assert!(to_string(&f).is_err());
+    }
+
+    #[test]
+    fn you_can_serialize_a_tuple_variant_containing_no_primitives() {
+        #[derive(Serialize)]
+        enum Foo {
+            A(Bar, Baz), 
+        }
+        #[derive(Serialize)]
+        struct Bar;
+        #[derive(Serialize)]
+        struct Baz(u32);
+
+        let f = Foo::A(Bar, Baz(5));
+        let should_be = "<Foo><Bar></Bar><Baz>5</Baz></Foo>";
+
+        let got = to_string(&f).unwrap();
+        assert_eq!(got, should_be);
+    }
+
+    #[test]
+    fn serialize_a_struct_variant() {
+        #[derive(Serialize)]
+        enum Foo {
+            Bar{ 
+                x: u32,
+                y: u32,
+            }
+        }
+
+        let f = Foo::Bar {x: 5, y: 1};
+        let should_be = "<Bar><x>5</x><y>1</y></Bar>";
+
+        let got = to_string(&f).unwrap();
+        assert_eq!(got, should_be);
     }
 }
