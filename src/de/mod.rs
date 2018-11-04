@@ -338,3 +338,58 @@ impl<'de, 'a, R: Read> de::Deserializer<'de> for &'a mut Deserializer<R> {
         }
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+      enum EnumWithVariants {
+        A,
+        B(u32),
+    }
+
+    #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+    struct StructHoldingEnum {
+      enum_here: EnumWithVariants,
+    }
+    
+    #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+    struct StructTupleEnum(EnumWithVariants);
+
+    #[test]
+    fn struct_holding_enum(){
+      let xml = "<StructHoldingEnum><enum_here><B>10</B></enum_here></StructHoldingEnum>";
+      let got = from_str::<StructHoldingEnum>(&xml).unwrap();
+      let expected = StructHoldingEnum {
+        enum_here: EnumWithVariants::B(10),
+      };
+      assert_eq!(expected, got);
+    }
+
+    #[test]
+    fn struct_holding_single_enum(){
+      let xml = "<StructHoldingEnum><enum_here>A</enum_here></StructHoldingEnum>";
+      let expected = StructHoldingEnum {
+        enum_here: EnumWithVariants::A,
+      };
+      let got = from_str::<StructHoldingEnum>(&xml).unwrap();
+      assert_eq!(expected, got);
+    }
+
+    #[test]
+    fn struct_tuple_single_enum(){
+      let xml = "<StructTupleEnum>A</StructTupleEnum>";
+      let expected = StructTupleEnum(EnumWithVariants::A);
+      let got = from_str::<StructTupleEnum>(&xml).unwrap();
+      assert_eq!(expected, got);
+    }
+
+    #[test]
+    fn struct_tuple_enum(){
+      let xml = "<StructTupleEnum><B>10</B></StructTupleEnum>";
+      let expected = StructTupleEnum(EnumWithVariants::B(10));
+      let got = from_str::<StructTupleEnum>(&xml).unwrap();
+      assert_eq!(expected, got);
+    }
+
+    
+}
