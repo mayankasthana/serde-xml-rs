@@ -213,7 +213,7 @@ where
         variant_index: u32,
         variant: &'static str,
     ) -> Result<Self::Ok> {
-        self.serialize_unit_struct(variant)
+        self.write_primitive(variant)
     }
 
     fn serialize_newtype_struct<T: ?Sized + Serialize>(
@@ -564,12 +564,50 @@ mod tests {
         }
 
         let f = Foo::A;
-        let should_be = "<A></A>";
+        let should_not_be = "<A></A>";
+        let should_be = "A";
 
         let got = to_string(&f).unwrap();
+        assert_ne!(got, should_not_be);
         assert_eq!(got, should_be);
-    }
 
+    }
+    
+
+    #[test]
+    fn single_enum_ser() {
+      #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+      enum EnumWithVariants {
+        A,
+        B(u32),
+      }
+      #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+      struct StructHoldingEnum {
+        enum_here: EnumWithVariants,
+      }
+      #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+      struct StructTupleEnum(EnumWithVariants);
+
+      let val = StructTupleEnum(EnumWithVariants::A);
+      let expected = "<StructTupleEnum>A</StructTupleEnum>";
+      let val_xml = to_string(&val).unwrap();
+      assert_eq!(expected, val_xml);
+
+      let val = StructHoldingEnum {
+        enum_here: EnumWithVariants::A,
+      };
+      let expected = "<StructHoldingEnum><enum_here>A</enum_here></StructHoldingEnum>";
+      let val_xml = to_string(&val).unwrap();
+      assert_eq!(expected, val_xml);
+
+      let val = StructHoldingEnum {
+        enum_here: EnumWithVariants::B(10),
+      };
+      let expected = "<StructHoldingEnum><enum_here><B>10</B></enum_here></StructHoldingEnum>";
+      let val_xml = to_string(&val).unwrap();
+      assert_eq!(expected, val_xml);
+    }
+    
     #[test]
     fn serialize_an_enum_with_a_tuple_variant_containing_primitives_is_error() {
         #[derive(Serialize)]
